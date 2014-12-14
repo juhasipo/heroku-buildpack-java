@@ -13,7 +13,6 @@ BIN_DIR=$(cd $(dirname $0); pwd) # absolute path
 BUILD_DIR=$1
 CACHE_DIR=$2
 ENV_DIR=$3
-GLOBAL_CACHE_DIR=/global_cache
 
 LOGGER_FLAGS=""
 
@@ -24,18 +23,6 @@ mkdir -p /tmp/jvm-common
 curl --silent --location $JVM_COMMON_BUILDPACK | tar xzm -C /tmp/jvm-common --strip-components=1
 . /tmp/jvm-common/bin/util
 . /tmp/jvm-common/bin/java
-
-KEEP_M2_CACHE="true"
-
-if [ ! -d $CACHE_DIR ]; then
-  KEEP_M2_CACHE="false"
-elif [ -f $CACHE_DIR/removeM2Cache ]; then
-  KEEP_M2_CACHE="false"
-fi
-
-if [ "true" == $KEEP_M2_CACHE ]; then
-  logger -p user.notice -t "slugc[$$]" "language_pack_java retain_m2_repo"
-fi
 
 #create the cache dir if it doesn't exist
 mkdir -p $CACHE_DIR
@@ -51,91 +38,12 @@ status_pending "Installing OpenJDK ${javaVersion}"
 install_java ${BUILD_DIR} ${javaVersion}
 jdk_overlay ${BUILD_DIR}
 status_done
+echo " done"
+
+cd $BUILD_DIR
 
 #copy the jdk to cache
 rm -rf $CACHE_DIR/.jdk
 cp -r $BUILD_DIR/.jdk $CACHE_DIR/.jdk
-
-# change to cache dir to install maven
-cd $CACHE_DIR
-
-# symlink from global cache directory
-if [ -d $GLOBAL_CACHE_DIR ]; then
-  echo "-----> Symlinking global Maven cache"
-  for DIR in ".m2" ".maven"; do
-    rm -rf $CACHE_DIR/$DIR
-    mkdir -p $GLOBAL_CACHE_DIR/$DIR
-    ln -s $GLOBAL_CACHE_DIR/$DIR $CACHE_DIR/$DIR
-  done
-fi
-
-install_maven ${CACHE_DIR} ${BUILD_DIR}
-
-if [ -n "$MAVEN_SETTINGS_PATH" ]; then
-  MAVEN_SETTINGS_OPT="-s $MAVEN_SETTINGS_PATH"
-elif [ -n "$MAVEN_SETTINGS_URL" ]; then
-  status_pending "Installing settings.xml"
-  mkdir -p .m2
-  curl --silent --max-time 10 --location $MAVEN_SETTINGS_URL --output .m2/settings.xml
-  status_done
-  MAVEN_SETTINGS_OPT="-s $CACHE_DIR/.m2/settings.xml"
-elif [ -f $BUILD_DIR/settings.xml ]; then
-  MAVEN_SETTINGS_OPT="-s $BUILD_DIR/settings.xml"
-else
-  unset MAVEN_SETTINGS_OPT
-fi
-
-# change to build dir to run maven
-cd $BUILD_DIR
-
-export MAVEN_OPTS="-Xmx1024m"
-
-# build app
-maven_profile="staging"
-if [ ! -z "$MAVEN_PROFILE" ]; then
-  maven_profile="$MAVEN_PROFILE"
-fi
-
-BUILDCMD="$CACHE_DIR/.maven/bin/mvn -B"
-BUILDCMD="$BUILDCMD -Duser.home=$BUILD_DIR"
-BUILDCMD="$BUILDCMD -Dmaven.repo.local=$CACHE_DIR/.m2/repository"
-BUILDCMD="$BUILDCMD $MAVEN_SETTINGS_OPT"
-BUILDCMD="$BUILDCMD ${MAVEN_CUSTOM_OPTS:-"-DskipTests=true -Dskip.unit.tests"}"
-BUILDCMD="$BUILDCMD -P$maven_profile"
-BUILDCMD="$BUILDCMD ${MAVEN_CUSTOM_GOALS:-"package"}"
-
-status "executing $BUILDCMD"
-
-$BUILDCMD 2>&1 | sed -u 's/^/       /'
-
-if [ "${PIPESTATUS[*]}" != "0 0" ]; then
-  error "Failed to build app with Maven"
-fi
-
-# download webapp-runner
-if [ -d $GLOBAL_CACHE_DIR/webapp-runner ]; then
-    cd $GLOBAL_CACHE_DIR/webapp-runner
-    git pull --ff-only 2>&1 >/dev/null
-    cd $BUILD_DIR
-    cp -r $GLOBAL_CACHE_DIR/webapp-runner .
-else
-    git clone https://github.com/Vincit/webapp-runner.git 2>&1 | sed -u 's/^/        /'
-
-    if [ -d $GLOBAL_CACHE_DIR ]; then
-        cp -r webapp-runner $GLOBAL_CACHE_DIR
-    fi
-fi
-
-cd webapp-runner
-$CACHE_DIR/.maven/bin/mvn -B -Duser.home=$BUILD_DIR/webapp-runner -Dmaven.repo.local=$CACHE_DIR/.m2/repository -s $CACHE_DIR/.m2/settings.xml -DskipTests=true -f ./pom.xml package 2>&1 | sed -u 's/^/        /'
-mkdir -p ../target/dependency
-cp target/webapp-runner.jar ../target/dependency/webapp-runner.jar
-cd ..
-rm -rf webapp-runner
-
-# finalize cache
-if [ "false" == $KEEP_M2_CACHE ]; then
-  touch $CACHE_DIR/removeM2Cache
-fi
 
 logger -p user.notice -t "slugc[$$]" "language_pack_java java_compile_end $LOGGER_FLAGS"
